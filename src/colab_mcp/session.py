@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import subprocess
 import asyncio
 from collections.abc import AsyncIterator
 import contextlib
@@ -97,6 +99,28 @@ class ColabProxyClient:
         await self._exit_stack.aclose()
 
 
+def _safe_open_browser(url: str):
+    """Safely open browser in GUI environment or save URL without stdio corruption."""
+    try:
+        with open("/tmp/colab_mcp_url.txt", "w") as f:
+            f.write(url + "\n")
+    except Exception:
+        pass
+
+    display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    if display:
+        try:
+            subprocess.Popen(
+                ["xdg-open", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+
 class ColabProxyMiddleware(Middleware):
     def __init__(self, proxy_client: ColabProxyClient):
         self.proxy_client = proxy_client
@@ -129,6 +153,11 @@ class ColabProxyMiddleware(Middleware):
             return result
         if self.proxy_client.is_connected():
             return result
+
+        token = self.proxy_client.wss.token
+        port = self.proxy_client.wss.port
+        url = f"{COLAB}{SCRATCH_PATH}#mcpProxyToken={token}&mcpProxyPort={port}"
+
         # if the tool call was for open_colab_browser_connection and there is no existing connection, try to await full connection
         await context.fastmcp_context.report_progress(
             progress=1, total=3, message="The user is not connected to the Colab UI"
@@ -136,7 +165,7 @@ class ColabProxyMiddleware(Middleware):
         await context.fastmcp_context.report_progress(
             progress=2,
             total=3,
-            message="Waiting for user to connect in Colab - will wait for 60s",
+            message=f"Waiting for user to connect in Colab - URL: {url}",
         )
         await self.proxy_client.await_proxy_connection()
         if self.proxy_client.is_connected():
@@ -154,8 +183,8 @@ class ColabProxyMiddleware(Middleware):
                 message="Timeout while waiting for the user to connect.",
             )
             return ToolResult(
-                content=[TextContent(type="text", text="false")],
-                structured_content={"result": False},
+                content=[TextContent(type="text", text=f"false\nPlease open this URL in your browser:\n{url}")],
+                structured_content={"result": False, "url": url, "port": port, "token": token},
             )
 
 
@@ -165,9 +194,8 @@ async def check_session_proxy_tool_fn(ctx: Context = CurrentContext()) -> bool:
     port = ctx.get_state(PROXY_PORT_KEY)
     if fe_connected:
         return True
-    webbrowser.open_new(
-        f"{COLAB}{SCRATCH_PATH}#mcpProxyToken={token}&mcpProxyPort={port}"
-    )
+    url = f"{COLAB}{SCRATCH_PATH}#mcpProxyToken={token}&mcpProxyPort={port}"
+    _safe_open_browser(url)
     return False
 
 

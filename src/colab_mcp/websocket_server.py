@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import socket
 import anyio
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 import asyncio
@@ -31,6 +32,13 @@ from websockets.typing import Subprotocol
 COLAB = "https://colab.research.google.com"
 COLAB_ALT_DOMAIN = "https://colab.google.com"
 SCRATCH_PATH = "/notebooks/empty.ipynb"
+
+
+def _get_free_port() -> int:
+    """Find a single available ephemeral port bound to both IPv4 and IPv6."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 class ColabWebSocketServer:
@@ -65,8 +73,8 @@ class ColabWebSocketServer:
         async for msg in websocket:
             try:
                 client_message = types.JSONRPCMessage.model_validate_json(msg)
-            except ValidationError as exc:
-                await self._read_stream_writer.send(exc)
+            except ValidationError:
+                # Colab sends custom extension messages like server/discover - ignore gracefully
                 continue
             await self._read_stream_writer.send(SessionMessage(client_message))
 
@@ -89,20 +97,26 @@ class ColabWebSocketServer:
             pass
 
     def _validate_authorization(self, websocket: ServerConnection, request: Request):
+        logging.info(f"[Auth Check] Request path: {request.path}")
         if request.path.find(f"access_token={self.token}") != -1:
+            logging.info("[Auth Check] Token matched via access_token query param!")
             return None
         try:
             headers: Headers = request.headers
             auth_header = headers.get("Authorization")
             if not auth_header:
+                logging.warning("[Auth Check] Missing authorization header and query param")
                 return Response(401, "Missing authorization", Headers([]))
             scheme, token = auth_header.split(None, 1)
             if scheme.lower() != "bearer":
+                logging.warning(f"[Auth Check] Invalid scheme: {scheme}")
                 return Response(400, "Invalid authorization header", Headers([]))
         except ValueError:
             return Response(400, "Invalid header format", Headers([]))
         if token == self.token:
+            logging.info("[Auth Check] Token matched via Bearer header!")
             return None
+        logging.warning(f"[Auth Check] Bad token: {token} != {self.token}")
         return Response(403, "Bad authorization token", Headers([]))
 
     async def _connection_handler(self, websocket: ServerConnection):
@@ -141,14 +155,17 @@ class ColabWebSocketServer:
                 self.connection_live.clear()
 
     async def __aenter__(self):
+        allocated_port = _get_free_port()
         self._server = await websockets.serve(
             self._connection_handler,
             host=self.host,
-            port=0,
+            port=allocated_port,
             subprotocols=[Subprotocol("mcp")],
             origins=self.allowed_origins,
             process_request=self._validate_authorization,
         )
+        for sock in self._server.sockets:
+            logging.info(f"server listening on {sock.getsockname()[0]}:{sock.getsockname()[1]}")
         self.port = self._server.sockets[0].getsockname()[1]
         logging.info(f"Starting WebSocket server on ws://{self.host}:{self.port}")
         return self

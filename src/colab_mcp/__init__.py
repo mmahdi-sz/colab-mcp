@@ -16,8 +16,13 @@ import argparse
 import asyncio
 import datetime
 import logging
+import os
 import tempfile
 import sys
+import warnings
+
+# Suppress deprecation and third-party warnings from polluting stdio JSON-RPC
+warnings.filterwarnings("ignore")
 
 from fastmcp import FastMCP
 from fastmcp.utilities import logging as fastmcp_logger
@@ -36,9 +41,9 @@ def init_logger(logdir):
         format="%(asctime)s %(levelname)s:%(message)s",
         datefmt="%m/%d/%Y %I:%M:%S %p",
         filename=log_filename,
-        level=logging.INFO,  # Set the minimum logging level to capture
+        level=logging.INFO,
     )
-    fastmcp_logger.get_logger("colab-mcp").info("logging to %s" % log_filename)
+    logging.info("logging to %s" % log_filename)
 
 
 def parse_args(v):
@@ -76,7 +81,7 @@ async def main_async():
             mcp.add_middleware(middleware)
 
     try:
-        await mcp.run_async()
+        await mcp.run_async(show_banner=False)
 
     finally:
         if args.enable_proxy:
